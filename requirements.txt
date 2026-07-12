@@ -4,7 +4,6 @@ pyscf-dispersion
 geometric
 rdkit
 py3Dmol
-stmol
 numpy
 pandas
 matplotlib

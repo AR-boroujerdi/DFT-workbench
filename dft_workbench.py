@@ -81,7 +81,7 @@ literature.
 
 HOW TO RUN
 ----------
-    pip install streamlit pyscf rdkit stmol py3Dmol numpy pandas matplotlib
+    pip install streamlit pyscf rdkit py3Dmol numpy pandas matplotlib
     streamlit run dft_workbench.py
 
 Optional (better geometry optimizer, recommended):
@@ -161,7 +161,7 @@ except Exception:
 
 try:
     import py3Dmol
-    import stmol
+    from streamlit.components.v1 import html as st_html
     VIEWER_OK = True
 except Exception:
     VIEWER_OK = False
@@ -295,10 +295,56 @@ class PySCFEngine:
     """
 
     @staticmethod
-    def build_mol(atom_block: str, basis: str, charge: int, spin: int) -> "gto.Mole":
+    def build_mol(atom_block: str, basis: str, charge: int, spin: int,
+                  result: Optional["CalcResult"] = None) -> "gto.Mole":
+        # Detect elements that require an effective core potential (ECP).
+        # Beyond Kr (Z=36), all-electron treatment with a standard basis is
+        # both very expensive and usually not what the basis set was
+        # designed for; relativistic effects also become non-negligible.
+        # The def2-* basis family in PySCF ships matching ECPs under the
+        # same name, so we request them automatically when needed rather
+        # than silently running an all-electron calculation on a heavy
+        # element (which could be quietly wrong or simply fail to build).
+        symbols = []
+        for line in atom_block.strip().splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            sym = line.split()[0]
+            sym = sym.split("-", 1)[-1] if sym.upper().startswith("X-") else sym
+            symbols.append(sym)
+
+        try:
+            heavy_present = any(gto.charge(s) > 36 for s in symbols)
+        except Exception:
+            heavy_present = False
+
+        ecp = None
+        if heavy_present:
+            if basis.lower().startswith("def2"):
+                ecp = basis  # PySCF looks up the matching def2-* ECP automatically
+                if result is not None:
+                    result.warnings.append(
+                        f"Heavy element detected (e.g. In or similar, Z>36): "
+                        f"automatically applying the matching '{basis}' "
+                        "effective core potential (ECP) rather than an "
+                        "all-electron treatment, per standard practice for "
+                        "this basis family."
+                    )
+            else:
+                if result is not None:
+                    result.warnings.append(
+                        f"Heavy element detected (Z>36) but basis '{basis}' "
+                        "does not have a standard matching ECP in this app. "
+                        "Results for this element may be inaccurate or the "
+                        "calculation may fail to build. Switch to def2-SVP "
+                        "or def2-TZVP for systems containing indium."
+                    )
+
         mol = gto.M(
             atom=atom_block,
             basis=basis,
+            ecp=ecp,
             charge=charge,
             spin=spin,
             unit="Angstrom",
@@ -352,7 +398,7 @@ class PySCFEngine:
             result.errors.append(f"PySCF is not installed/importable: {PYSCF_IMPORT_ERROR}")
             return result
         try:
-            mol = PySCFEngine.build_mol(atom_block, settings.basis, settings.charge, settings.spin)
+            mol = PySCFEngine.build_mol(atom_block, settings.basis, settings.charge, settings.spin, result)
         except Exception as e:
             result.errors.append(f"Failed to build molecule (check atoms/charge/spin): {e}")
             return result
@@ -558,7 +604,7 @@ def xyz_block_to_full_xyz(atom_block: str) -> str:
 # ==========================================================================
 def render_3d(atom_block: str, height=400):
     if not VIEWER_OK:
-        st.info("Install `py3Dmol` and `stmol` for interactive 3D structure viewing.")
+        st.info("Install `py3Dmol` for interactive 3D structure viewing.")
         st.code(atom_block)
         return
     xyz = xyz_block_to_full_xyz(atom_block)
@@ -566,7 +612,8 @@ def render_3d(atom_block: str, height=400):
     view.addModel(xyz, "xyz")
     view.setStyle({"stick": {}, "sphere": {"scale": 0.25}})
     view.zoomTo()
-    stmol.showmol(view, height=height, width=600)
+    st_html(view._make_html(), height=height, width=600)
+
 
 
 def plot_orbital_diagram(result: CalcResult):
