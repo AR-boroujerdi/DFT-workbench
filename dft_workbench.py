@@ -513,7 +513,9 @@ def combine_blocks(a: str, b: str) -> str:
     return a.strip() + "\n" + b.strip()
 
 
-def run_interaction_energy(atom_A: str, atom_B: str, settings: CalcSettings):
+def run_interaction_energy(atom_A: str, atom_B: str, settings: CalcSettings,
+                            charge_A: int = 0, spin_A: int = 0,
+                            charge_B: int = 0, spin_B: int = 0):
     """Standard supermolecular + Boys-Bernardi counterpoise workflow:
         E_int(raw)   = E(AB) - E(A) - E(B)
         E_int(CP)    = E(AB) - E(A in AB basis) - E(B in AB basis)
@@ -521,11 +523,23 @@ def run_interaction_energy(atom_A: str, atom_B: str, settings: CalcSettings):
     counterpoise workflow (standard practice: optimize the complex once,
     then evaluate single points for the CP correction at that fixed
     geometry) to keep the correction well-defined.
+
+    IMPORTANT: charge/spin are tracked SEPARATELY for each fragment,
+    since real sensor-drug systems are frequently NOT both neutral (e.g.
+    a metal-chelated sensor cluster carrying a net charge interacting
+    with a neutral drug molecule). The complex's total charge/spin is
+    the sum of the two fragments' charge and (for closed-shell singlets)
+    spin=0; open-shell combinations should be checked by the user.
     """
-    sp_settings = CalcSettings(**{**asdict(settings), "do_geom_opt": False})
+    charge_complex = charge_A + charge_B
+    spin_complex = settings.spin  # user-set for the combined system; see UI note
+
+    complex_settings = CalcSettings(**{**asdict(settings), "charge": charge_complex})
+    a_settings = CalcSettings(**{**asdict(settings), "charge": charge_A, "spin": spin_A, "do_geom_opt": False})
+    b_settings = CalcSettings(**{**asdict(settings), "charge": charge_B, "spin": spin_B, "do_geom_opt": False})
 
     complex_block = combine_blocks(atom_A, atom_B)
-    res_complex = PySCFEngine.compute(complex_block, settings, "Complex (AB)")
+    res_complex = PySCFEngine.compute(complex_block, complex_settings, "Complex (AB)")
 
     geometry_for_monomers = res_complex.optimized_atom if (
         settings.do_geom_opt and res_complex.optimized_atom
@@ -539,14 +553,16 @@ def run_interaction_energy(atom_A: str, atom_B: str, settings: CalcSettings):
     a_block_final = "\n".join(a_lines)
     b_block_final = "\n".join(b_lines)
 
-    res_A = PySCFEngine.compute(a_block_final, sp_settings, "Monomer A (isolated)")
-    res_B = PySCFEngine.compute(b_block_final, sp_settings, "Monomer B (isolated)")
+    res_A = PySCFEngine.compute(a_block_final, a_settings, "Monomer A (isolated)")
+    res_B = PySCFEngine.compute(b_block_final, b_settings, "Monomer B (isolated)")
 
     # Counterpoise: A/B computed in the full dimer basis via ghost atoms
+    # (same real charge/spin as the isolated monomer; only the BASIS
+    # gains the partner's ghost functions, not real electrons)
     a_in_ab = combine_blocks(a_block_final, ghost_block(b_block_final))
     b_in_ab = combine_blocks(ghost_block(a_block_final), b_block_final)
-    res_A_cp = PySCFEngine.compute(a_in_ab, sp_settings, "Monomer A (dimer basis, CP)")
-    res_B_cp = PySCFEngine.compute(b_in_ab, sp_settings, "Monomer B (dimer basis, CP)")
+    res_A_cp = PySCFEngine.compute(a_in_ab, a_settings, "Monomer A (dimer basis, CP)")
+    res_B_cp = PySCFEngine.compute(b_in_ab, b_settings, "Monomer B (dimer basis, CP)")
 
     out = {
         "complex": res_complex,
@@ -794,13 +810,27 @@ with tab_interaction:
     with colA:
         st.markdown("**Fragment A**")
         block_a = st.text_area("Atom block A", value="O -1.551007 -0.114520 0.0\nH -1.934259 0.762503 0.0\nH -0.599677 0.040712 0.0", height=140, key="frag_a")
+        charge_a = st.number_input("Charge of Fragment A", value=0, step=1, key="charge_a")
+        spin_a = st.number_input("Spin of Fragment A (2S)", value=0, step=1, min_value=0, key="spin_a")
     with colB:
         st.markdown("**Fragment B**")
         block_b = st.text_area("Atom block B", value="O 1.350625 0.111469 0.0\nH 1.680398 -0.373741 -0.758561\nH 1.680398 -0.373741 0.758561", height=140, key="frag_b")
+        charge_b = st.number_input("Charge of Fragment B", value=0, step=1, key="charge_b")
+        spin_b = st.number_input("Spin of Fragment B (2S)", value=0, step=1, min_value=0, key="spin_b")
+    st.caption(
+        f"Complex will be built with total charge = {charge_a + charge_b} "
+        "(sum of the two fragments) — this overrides the sidebar's 'Total "
+        "charge' field for this tab only, since sensor+analyte systems are "
+        "frequently not both neutral."
+    )
 
     if st.button("▶ Run interaction energy workflow", type="primary"):
         with st.spinner("Running complex + monomer + counterpoise calculations (5 SCF jobs total)..."):
-            out, e_raw, e_cp = run_interaction_energy(block_a, block_b, settings)
+            out, e_raw, e_cp = run_interaction_energy(
+                block_a, block_b, settings,
+                charge_A=int(charge_a), spin_A=int(spin_a),
+                charge_B=int(charge_b), spin_B=int(spin_b),
+            )
         c1, c2 = st.columns(2)
         c1.metric("Raw interaction energy", f"{e_raw:.2f} kcal/mol" if e_raw is not None else "—")
         c2.metric("BSSE-corrected (counterpoise)", f"{e_cp:.2f} kcal/mol" if e_cp is not None else "—")
