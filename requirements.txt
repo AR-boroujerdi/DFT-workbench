@@ -1,0 +1,10 @@
+streamlit>=1.30
+pyscf>=2.4
+pyscf-dispersion
+geometric
+rdkit
+py3Dmol
+stmol
+numpy
+pandas
+matplotlib
