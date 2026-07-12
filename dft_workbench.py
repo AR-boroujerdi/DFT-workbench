@@ -281,6 +281,86 @@ class CalcResult:
         d = asdict(self)
         return json.dumps(d, indent=2, default=str).encode("utf-8")
 
+    def to_text_summary(self) -> str:
+        s = self.settings
+        lines = [
+            f"DFT Workbench calculation record",
+            f"=================================",
+            f"Label:              {self.label}",
+            f"Timestamp (UTC):     {self.timestamp_utc}",
+            f"PySCF version:       {self.pyscf_version}",
+            f"App version:         {self.app_version}",
+            f"",
+            f"--- Method ---",
+            f"Functional:          {s.functional}",
+            f"Basis set:           {s.basis}",
+            f"Dispersion requested:{s.dispersion}",
+            f"Dispersion applied:  {self.dispersion_applied}",
+            f"Charge:              {s.charge}",
+            f"Spin (2S):           {s.spin}",
+            f"Geometry optimized:  {s.do_geom_opt}",
+            f"Geometry converged:  {self.geom_converged}",
+            f"",
+            f"--- Result ---",
+            f"SCF converged:       {self.converged}",
+            f"Energy (Hartree):    {self.energy_hartree}",
+            f"Wall time (s):       {self.wall_time_s}",
+            f"Dipole (Debye):      {self.dipole_debye}",
+            f"HOMO (eV):           {self.homo_ev}",
+            f"LUMO (eV):           {self.lumo_ev}",
+            f"Gap (eV):            {self.gap_ev}",
+            f"",
+        ]
+        if self.warnings:
+            lines.append("--- Warnings ---")
+            lines.extend(f"- {w}" for w in self.warnings)
+            lines.append("")
+        if self.errors:
+            lines.append("--- Errors ---")
+            lines.extend(f"- {e}" for e in self.errors)
+            lines.append("")
+        lines.append("--- Input geometry (Angstrom) ---")
+        lines.append(self.atom_input)
+        if self.optimized_atom:
+            lines.append("")
+            lines.append("--- Optimized geometry (Angstrom) ---")
+            lines.append(self.optimized_atom)
+        if self.mulliken_charges:
+            lines.append("")
+            lines.append("--- Mulliken charges ---")
+            atom_lines = [l for l in (self.optimized_atom or self.atom_input).strip().splitlines() if l.strip()]
+            for i, q in enumerate(self.mulliken_charges):
+                sym = atom_lines[i].split()[0] if i < len(atom_lines) else "?"
+                lines.append(f"{sym}{i}: {q:.4f}")
+        return "\n".join(lines)
+
+    def to_csv_row(self) -> dict:
+        """One flat row summarizing this result -- convenient for pasting
+        into a spreadsheet or building up a comparison table across
+        multiple runs (e.g. screening several candidate binding sites)."""
+        return {
+            "label": self.label,
+            "timestamp_utc": self.timestamp_utc,
+            "functional": self.settings.functional,
+            "basis": self.settings.basis,
+            "dispersion_requested": self.settings.dispersion,
+            "dispersion_applied": self.dispersion_applied,
+            "charge": self.settings.charge,
+            "spin": self.settings.spin,
+            "geom_opt_requested": self.settings.do_geom_opt,
+            "geom_converged": self.geom_converged,
+            "scf_converged": self.converged,
+            "energy_hartree": self.energy_hartree,
+            "wall_time_s": self.wall_time_s,
+            "homo_ev": self.homo_ev,
+            "lumo_ev": self.lumo_ev,
+            "gap_ev": self.gap_ev,
+            "dipole_debye_norm": (float(np.linalg.norm(self.dipole_debye))
+                                  if self.dipole_debye else None),
+            "n_warnings": len(self.warnings),
+            "n_errors": len(self.errors),
+        }
+
 
 # ==========================================================================
 # Core computational chemistry engine wrapper (PySCF)
@@ -688,7 +768,7 @@ def show_result(result: CalcResult, atom_block_for_charges: Optional[str] = None
         for e in result.errors:
             st.error(e)
 
-    tabs = st.tabs(["Structure", "Frontier orbitals", "Charges", "Raw record (JSON)"])
+    tabs = st.tabs(["Structure", "Frontier orbitals", "Charges", "Summary (text/CSV)"])
     with tabs[0]:
         render_3d(result.optimized_atom or result.atom_input)
     with tabs[1]:
@@ -696,12 +776,19 @@ def show_result(result: CalcResult, atom_block_for_charges: Optional[str] = None
     with tabs[2]:
         plot_charges(result, atom_block_for_charges or result.atom_input)
     with tabs[3]:
-        st.json(json.loads(result.to_json_bytes()))
+        st.text(result.to_text_summary())
         st.download_button(
-            "Download calculation record (JSON)",
-            data=result.to_json_bytes(),
-            file_name=f"{result.label.replace(' ', '_')}_record.json",
-            mime="application/json",
+            "Download summary (.txt)",
+            data=result.to_text_summary().encode("utf-8"),
+            file_name=f"{result.label.replace(' ', '_')}_summary.txt",
+            mime="text/plain",
+        )
+        row_df = pd.DataFrame([result.to_csv_row()])
+        st.download_button(
+            "Download data row (.csv)",
+            data=row_df.to_csv(index=False).encode("utf-8"),
+            file_name=f"{result.label.replace(' ', '_')}_data.csv",
+            mime="text/csv",
         )
 
 
@@ -746,6 +833,15 @@ with st.sidebar:
     charge = st.number_input("Total charge", value=0, step=1)
     spin = st.number_input("Spin (2S, 0 = closed-shell singlet)", value=0, step=1, min_value=0)
     do_geom_opt = st.checkbox("Optimize geometry before energy/property analysis", value=True)
+    st.caption(
+        "⚠️ Free hosting tiers (e.g. Streamlit Community Cloud) are capped "
+        "at 1 GB RAM and can time out on long jobs. Systems above roughly "
+        "40-50 atoms, especially with geometry optimization on, may crash "
+        "with a generic 'Error running app' message rather than a chemistry "
+        "error. If that happens: try basis=STO-3G or 6-31G* first, or turn "
+        "geometry optimization off for an initial single-point screen, "
+        "before committing to a full optimization on a large system."
+    )
     if do_geom_opt and GEOMOPT_BACKEND is None:
         st.caption("⚠️ No optimizer backend found; install `geometric` or "
                    "`pyberny`. Falling back to single-point at input geometry.")
@@ -824,6 +920,8 @@ with tab_interaction:
         "frequently not both neutral."
     )
 
+    site_label = st.text_input("Label this run for the comparison table (e.g. 'Carboxylate O site')", value="")
+
     if st.button("▶ Run interaction energy workflow", type="primary"):
         with st.spinner("Running complex + monomer + counterpoise calculations (5 SCF jobs total)..."):
             out, e_raw, e_cp = run_interaction_energy(
@@ -840,6 +938,40 @@ with tab_interaction:
         for key, res in out.items():
             with st.expander(f"Details: {res.label}"):
                 show_result(res)
+
+        if "site_comparison_rows" not in st.session_state:
+            st.session_state["site_comparison_rows"] = []
+        st.session_state["site_comparison_rows"].append({
+            "site_label": site_label or f"run_{len(st.session_state['site_comparison_rows'])+1}",
+            "charge_A": charge_a, "spin_A": spin_a,
+            "charge_B": charge_b, "spin_B": spin_b,
+            "functional": settings.functional, "basis": settings.basis,
+            "dispersion": settings.dispersion,
+            "e_int_raw_kcal_mol": e_raw,
+            "e_int_cp_kcal_mol": e_cp,
+            "complex_converged": out["complex"].converged,
+            "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+        })
+
+    if st.session_state.get("site_comparison_rows"):
+        st.divider()
+        st.subheader("Site comparison table (this session)")
+        st.caption(
+            "Every run above gets appended here automatically. This is lost "
+            "if you close/reload the page, so download the CSV as you go "
+            "if you want to keep it across multiple sites/sessions."
+        )
+        comp_df = pd.DataFrame(st.session_state["site_comparison_rows"])
+        st.dataframe(comp_df.sort_values("e_int_cp_kcal_mol", na_position="last"))
+        st.download_button(
+            "Download comparison table (.csv)",
+            data=comp_df.to_csv(index=False).encode("utf-8"),
+            file_name="binding_site_comparison.csv",
+            mime="text/csv",
+        )
+        if st.button("Clear comparison table"):
+            st.session_state["site_comparison_rows"] = []
+            st.rerun()
 
 # ---------------- Benchmark tab ----------------
 with tab_benchmark:
